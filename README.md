@@ -28,6 +28,6 @@ installed by any tool that supports [ADBC](https://arrow.apache.org/adbc/)
 Driver Manifests, such as [dbc](https://columnar.tech/dbc):
 
 ```sh
-dbc install mariadb
+dbc install --no-verify <path to>/mariadb_linux_amd64_v0.1.0.tar.gz
 ```
 
