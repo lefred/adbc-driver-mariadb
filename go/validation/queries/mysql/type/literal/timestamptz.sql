@@ -1,0 +1,2 @@
+--  MariaDB has no TIMESTAMP literal syntax
+SELECT CAST('2023-05-15 13:45:30' AS DATETIME(6)) AS res

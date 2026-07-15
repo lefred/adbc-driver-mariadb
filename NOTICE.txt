@@ -1,0 +1,6 @@
+ADBC Driver for MariaDB
+Copyright 2025 ADBC Drivers Contributors
+Copyright 2026 lefred - MariaDB Foundation
+
+This product includes software developed at
+The Apache Software Foundation (http://www.apache.org/).
