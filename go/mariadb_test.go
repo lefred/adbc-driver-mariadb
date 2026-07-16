@@ -26,6 +26,7 @@ import (
 	"time"
 
 	"github.com/adbc-drivers/driverbase-go/driverbase"
+	"github.com/adbc-drivers/driverbase-go/testutil"
 	"github.com/adbc-drivers/driverbase-go/validation"
 	"github.com/apache/arrow-adbc/go/adbc"
 	"github.com/apache/arrow-go/v18/arrow"
@@ -243,7 +244,7 @@ func (q *MariaDBQuirks) SupportsExecuteSchema() bool                 { return tr
 func (q *MariaDBQuirks) SupportsGetSetOptions() bool                 { return true }
 func (q *MariaDBQuirks) SupportsGetTableSchema() bool                { return true }
 func (q *MariaDBQuirks) SupportsPartitionedData() bool               { return false }
-func (q *MariaDBQuirks) SupportsStatistics() bool                    { return false }
+func (q *MariaDBQuirks) SupportsStatistics() bool                    { return true }
 func (q *MariaDBQuirks) SupportsTransactions() bool                  { return true }
 func (q *MariaDBQuirks) SupportsGetParameterSchema() bool            { return false }
 func (q *MariaDBQuirks) SupportsDynamicParameterBinding() bool       { return true }
@@ -378,6 +379,69 @@ func (s *MariaDBTests) transactionTestRowCount() int64 {
 	s.Require().True(rdr.Next())
 	s.Require().NoError(rdr.Err())
 	return rdr.RecordBatch().Column(0).(*array.Int64).Value(0)
+}
+
+func (s *MariaDBTests) TestStatistics() {
+	const table = "adbc_statistics_test"
+	s.Require().NoError(s.stmt.SetSqlQuery(s.ctx, "DROP TABLE IF EXISTS "+table))
+	_, err := s.stmt.ExecuteUpdate(s.ctx)
+	s.Require().NoError(err)
+	defer func() {
+		s.Require().NoError(s.stmt.SetSqlQuery(s.ctx, "DROP TABLE IF EXISTS "+table))
+		_, err := s.stmt.ExecuteUpdate(s.ctx)
+		s.NoError(err)
+	}()
+
+	s.Require().NoError(s.stmt.SetSqlQuery(s.ctx,
+		"CREATE TABLE "+table+" (id INT PRIMARY KEY, category VARCHAR(20), INDEX(category))"))
+	_, err = s.stmt.ExecuteUpdate(s.ctx)
+	s.Require().NoError(err)
+	s.Require().NoError(s.stmt.SetSqlQuery(s.ctx,
+		"INSERT INTO "+table+" VALUES (1, 'a'), (2, 'a'), (3, 'b')"))
+	_, err = s.stmt.ExecuteUpdate(s.ctx)
+	s.Require().NoError(err)
+	s.Require().NoError(s.stmt.SetSqlQuery(s.ctx, "ANALYZE TABLE "+table))
+	rdr, _, err := s.stmt.ExecuteQuery(s.ctx)
+	s.Require().NoError(err)
+	rdr.Release()
+
+	catalog, err := s.cnxn.(adbc.GetSetOptionsWithContext).GetOption(s.ctx, adbc.OptionKeyCurrentCatalog)
+	s.Require().NoError(err)
+	emptySchema := ""
+	tablePattern := table
+	statsReader, err := s.cnxn.(adbc.ConnectionGetStatistics).GetStatistics(
+		s.ctx, &catalog, &emptySchema, &tablePattern, true)
+	s.Require().NoError(err)
+	defer statsReader.Release()
+	s.Require().True(statsReader.Next())
+	s.Require().NoError(statsReader.Err())
+
+	stats := testutil.ExtractStatisticsForTable(statsReader.RecordBatch(), catalog, "", table)
+	s.NotEmpty(stats)
+	var foundRowCount, foundDistinct, foundDataLength bool
+	for _, stat := range stats {
+		s.True(stat.IsApproximate)
+		switch stat.StatisticKey {
+		case adbc.StatisticRowCountKey:
+			foundRowCount = true
+		case adbc.StatisticDistinctCountKey:
+			foundDistinct = true
+		case 1024:
+			foundDataLength = true
+		}
+	}
+	s.True(foundRowCount)
+	s.True(foundDistinct)
+	s.True(foundDataLength)
+
+	namesReader, err := s.cnxn.(adbc.ConnectionGetStatistics).GetStatisticNames(s.ctx)
+	s.Require().NoError(err)
+	defer namesReader.Release()
+	s.Require().True(namesReader.Next())
+	s.EqualValues(3, namesReader.RecordBatch().NumRows())
+	s.Equal("mariadb.statistic.data_length",
+		namesReader.RecordBatch().Column(0).(*array.String).Value(0))
+	s.EqualValues(1024, namesReader.RecordBatch().Column(1).(*array.Int16).Value(0))
 }
 
 type selectCase struct {

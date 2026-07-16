@@ -161,6 +161,22 @@ Check-constraint expressions likewise have no field in the standard ADBC
 constraint structure; the driver exposes their name and `CHECK` type and uses
 `JSON_VALID(column)` internally to recover MariaDB's logical JSON alias.
 
+### Statistics
+
+`GetStatistics` reports the standard ADBC row-count statistic from
+`information_schema.TABLES` and distinct-count estimates for indexed columns
+from `information_schema.STATISTICS`. It also exposes the MariaDB-specific
+statistics `mariadb.statistic.data_length`,
+`mariadb.statistic.index_length`, and
+`mariadb.statistic.avg_row_length`; their keys are available through
+`GetStatisticNames`.
+
+MariaDB metadata values, including InnoDB row counts and index cardinalities,
+are estimates. The driver therefore marks these statistics approximate even
+when exact statistics are requested. It does not implicitly execute `ANALYZE
+TABLE` or `ANALYZE FORMAT=JSON`, since those operations can scan data, update
+persistent optimizer statistics, or execute the analyzed statement.
+
 ## Options
 
 `mariadb.query.zero_datetime_behavior`
