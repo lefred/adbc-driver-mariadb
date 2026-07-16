@@ -799,10 +799,114 @@ func (db *mariadbDatabase) SetOption(ctx context.Context, key, value string) err
 type mariadbStatement struct {
 	*sqlwrapper.StatementImplBase
 	zeroDatetimeBehavior zeroDatetimeBehavior
+	query                string
+	prepared             bool
 }
 
 func (s *mariadbStatement) MakeTypeConverter(vendorName string) sqlwrapper.TypeConverter {
 	return makeTypeConverter(s.zeroDatetimeBehavior)
+}
+
+func (s *mariadbStatement) SetSqlQuery(ctx context.Context, query string) error {
+	if err := s.StatementImplBase.SetSqlQuery(ctx, query); err != nil {
+		return err
+	}
+	s.query = query
+	s.prepared = false
+	return nil
+}
+
+func (s *mariadbStatement) Prepare(ctx context.Context) error {
+	if err := s.StatementImplBase.Prepare(ctx); err != nil {
+		s.prepared = false
+		return err
+	}
+	s.prepared = true
+	return nil
+}
+
+// GetParameterSchema reports the number and order of positional parameters.
+// The database/sql API exposes neither the parameter definitions nor their
+// inferred types from COM_STMT_PREPARE, so ADBC requires null-typed fields.
+func (s *mariadbStatement) GetParameterSchema(context.Context) (*arrow.Schema, error) {
+	if !s.prepared {
+		return nil, s.Base().ErrorHelper.InvalidState("statement must be prepared before getting parameter schema")
+	}
+
+	fields := make([]arrow.Field, countPlaceholders(s.query))
+	for i := range fields {
+		fields[i] = arrow.Field{Type: arrow.Null, Nullable: true}
+	}
+	return arrow.NewSchema(fields, nil), nil
+}
+
+// countPlaceholders counts positional '?' parameters while ignoring quoted
+// strings, quoted identifiers, and SQL comments.
+func countPlaceholders(query string) int {
+	const (
+		plain = iota
+		singleQuoted
+		doubleQuoted
+		backtickQuoted
+		lineComment
+		blockComment
+	)
+
+	state, count := plain, 0
+	for i := 0; i < len(query); i++ {
+		ch := query[i]
+		switch state {
+		case plain:
+			switch ch {
+			case '?':
+				count++
+			case '\'':
+				state = singleQuoted
+			case '"':
+				state = doubleQuoted
+			case '`':
+				state = backtickQuoted
+			case '#':
+				state = lineComment
+			case '-':
+				if i+2 < len(query) && query[i+1] == '-' && query[i+2] <= ' ' {
+					state = lineComment
+					i++
+				}
+			case '/':
+				if i+1 < len(query) && query[i+1] == '*' {
+					state = blockComment
+					i++
+				}
+			}
+		case singleQuoted, doubleQuoted, backtickQuoted:
+			quote := byte('\'')
+			if state == doubleQuoted {
+				quote = '"'
+			} else if state == backtickQuoted {
+				quote = '`'
+			}
+			if ch == '\\' && state != backtickQuoted && i+1 < len(query) {
+				i++
+			} else if ch == quote {
+				if i+1 < len(query) && query[i+1] == quote {
+					i++
+				} else {
+					state = plain
+				}
+			}
+		case lineComment:
+			if ch == '\n' || ch == '\r' {
+				state = plain
+			}
+		case blockComment:
+			if ch == '*' && i+1 < len(query) && query[i+1] == '/' {
+				state = plain
+				i++
+			}
+		}
+	}
+	return count
 }
 
 func (c *mariadbConnectionImpl) NewStatement(ctx context.Context) (adbc.StatementWithContext, error) {
@@ -824,6 +928,26 @@ func (c *mariadbConnectionImpl) GetOption(ctx context.Context, key string) (stri
 	switch key {
 	case OptionKeyZeroDatetimeBehavior:
 		return c.zeroDatetimeBehavior.String(), nil
+	case adbc.OptionKeyIsolationLevel:
+		if err := c.ClearPending(); err != nil {
+			return "", err
+		}
+		var level string
+		if err := c.Conn.QueryRowContext(ctx, "SELECT @@SESSION.transaction_isolation").Scan(&level); err != nil {
+			return "", c.ErrorHelper.WrapIO(err, "failed to get transaction isolation level")
+		}
+		switch strings.ToUpper(strings.ReplaceAll(level, "-", " ")) {
+		case "READ UNCOMMITTED":
+			return string(adbc.LevelReadUncommitted), nil
+		case "READ COMMITTED":
+			return string(adbc.LevelReadCommitted), nil
+		case "REPEATABLE READ":
+			return string(adbc.LevelRepeatableRead), nil
+		case "SERIALIZABLE":
+			return string(adbc.LevelSerializable), nil
+		default:
+			return "", c.ErrorHelper.Internal("unknown MariaDB transaction isolation level %q", level)
+		}
 	default:
 		return c.ConnectionImplBase.GetOption(ctx, key)
 	}
@@ -838,9 +962,41 @@ func (c *mariadbConnectionImpl) SetOption(ctx context.Context, key, value string
 		}
 		c.zeroDatetimeBehavior = behavior
 		return nil
+	case adbc.OptionKeyIsolationLevel:
+		return c.setIsolationLevel(ctx, value)
 	default:
 		return c.ConnectionImplBase.SetOption(ctx, key, value)
 	}
+}
+
+func (c *mariadbConnectionImpl) setIsolationLevel(ctx context.Context, value string) error {
+	if err := c.ClearPending(); err != nil {
+		return err
+	}
+
+	var query string
+	switch adbc.OptionIsolationLevel(value) {
+	case adbc.LevelDefault:
+		query = "SET SESSION transaction_isolation = DEFAULT"
+	case adbc.LevelReadUncommitted:
+		query = "SET SESSION TRANSACTION ISOLATION LEVEL READ UNCOMMITTED"
+	case adbc.LevelReadCommitted:
+		query = "SET SESSION TRANSACTION ISOLATION LEVEL READ COMMITTED"
+	case adbc.LevelRepeatableRead:
+		query = "SET SESSION TRANSACTION ISOLATION LEVEL REPEATABLE READ"
+	case adbc.LevelSerializable:
+		query = "SET SESSION TRANSACTION ISOLATION LEVEL SERIALIZABLE"
+	case adbc.LevelSnapshot, adbc.LevelLinearizable:
+		return c.ErrorHelper.Errorf(adbc.StatusNotImplemented,
+			"transaction isolation level %q is not supported by MariaDB", value)
+	default:
+		return c.ErrorHelper.InvalidArgument("invalid transaction isolation level %q", value)
+	}
+
+	if _, err := c.Conn.ExecContext(ctx, query); err != nil {
+		return c.ErrorHelper.WrapIO(err, "failed to set transaction isolation level")
+	}
+	return nil
 }
 
 // SetAutocommit updates the transaction mode for this connection's dedicated

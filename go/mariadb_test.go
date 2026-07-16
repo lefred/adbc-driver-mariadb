@@ -246,7 +246,7 @@ func (q *MariaDBQuirks) SupportsGetTableSchema() bool                { return tr
 func (q *MariaDBQuirks) SupportsPartitionedData() bool               { return false }
 func (q *MariaDBQuirks) SupportsStatistics() bool                    { return true }
 func (q *MariaDBQuirks) SupportsTransactions() bool                  { return true }
-func (q *MariaDBQuirks) SupportsGetParameterSchema() bool            { return false }
+func (q *MariaDBQuirks) SupportsGetParameterSchema() bool            { return true }
 func (q *MariaDBQuirks) SupportsDynamicParameterBinding() bool       { return true }
 func (q *MariaDBQuirks) SupportsErrorIngestIncompatibleSchema() bool { return true }
 func (q *MariaDBQuirks) Catalog() string                             { return "db" }
@@ -369,6 +369,52 @@ func (s *MariaDBTests) TestTransactions() {
 	s.EqualValues(1, s.transactionTestRowCount())
 
 	s.Require().NoError(options.SetOption(s.ctx, adbc.OptionKeyAutoCommit, adbc.OptionValueEnabled))
+}
+
+func (s *MariaDBTests) TestTransactionIsolationOption() {
+	options := s.cnxn.(adbc.GetSetOptionsWithContext)
+	defer func() {
+		s.Require().NoError(options.SetOption(s.ctx, adbc.OptionKeyIsolationLevel,
+			string(adbc.LevelDefault)))
+	}()
+
+	for _, level := range []adbc.OptionIsolationLevel{
+		adbc.LevelReadUncommitted,
+		adbc.LevelReadCommitted,
+		adbc.LevelRepeatableRead,
+		adbc.LevelSerializable,
+	} {
+		s.Require().NoError(options.SetOption(s.ctx, adbc.OptionKeyIsolationLevel, string(level)))
+		actual, err := options.GetOption(s.ctx, adbc.OptionKeyIsolationLevel)
+		s.Require().NoError(err)
+		s.Equal(string(level), actual)
+	}
+
+	err := options.SetOption(s.ctx, adbc.OptionKeyIsolationLevel, string(adbc.LevelSnapshot))
+	var adbcErr adbc.Error
+	s.Require().ErrorAs(err, &adbcErr)
+	s.Equal(adbc.StatusNotImplemented, adbcErr.Code)
+
+	err = options.SetOption(s.ctx, adbc.OptionKeyIsolationLevel, "invalid")
+	s.Require().ErrorAs(err, &adbcErr)
+	s.Equal(adbc.StatusInvalidArgument, adbcErr.Code)
+}
+
+func (s *MariaDBTests) TestGetParameterSchema() {
+	stmt, err := s.cnxn.NewStatement(s.ctx)
+	s.Require().NoError(err)
+	defer testutil.CheckedCloseWithContext(s.T(), stmt, s.ctx)
+
+	s.Require().NoError(stmt.SetSqlQuery(s.ctx, "SELECT ?, '?', ? /* ? */"))
+	s.Require().NoError(stmt.Prepare(s.ctx))
+	schema, err := stmt.GetParameterSchema(s.ctx)
+	s.Require().NoError(err)
+	s.Require().Len(schema.Fields(), 2)
+	for _, field := range schema.Fields() {
+		s.Equal("", field.Name)
+		s.Equal(arrow.NULL, field.Type.ID())
+		s.True(field.Nullable)
+	}
 }
 
 func (s *MariaDBTests) transactionTestRowCount() int64 {
