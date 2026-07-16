@@ -144,6 +144,77 @@ storage types: notably `UUID` as `CHAR` and `JSON` as `LONGTEXT`. For arbitrary
 SQL query results the driver does not guess from values. Cast at the consumer
 or use `GetTableSchema` when native logical types are required.
 
+### Parameter schema discovery
+
+Prepared statements support `GetParameterSchema`. The returned Arrow schema
+contains one field for each positional `?` parameter, in binding order. The
+placeholder parser ignores question marks inside quoted strings, quoted
+identifiers, and SQL comments.
+
+MariaDB's prepared-statement protocol reports the number of parameters but
+does not expose their inferred definitions through `database/sql`. Parameter
+fields are therefore unnamed, nullable Arrow `null` fields. Applications can
+use the schema to discover parameter count and order, but must still obtain
+the intended parameter types from application or query context.
+
+The statement must be prepared before requesting its parameter schema:
+
+```python
+from adbc_driver_manager import dbapi
+
+with dbapi.connect(driver="mariadb", uri="mariadb://root@localhost/demo") as conn:
+    with conn.cursor() as cursor:
+        sql = "SELECT CAST(? AS SIGNED), CAST(? AS CHAR)"
+        parameter_schema = cursor.adbc_prepare(sql)
+        print(parameter_schema)
+
+        cursor.execute(sql, [42, "MariaDB"])
+        print(cursor.fetch_arrow_table())
+```
+
+### Transactions and isolation levels
+
+Connections use autocommit by default at the ADBC API level. Set
+`adbc.connection.autocommit` to `false` to group subsequent statements into a
+transaction, then use `Commit` or `Rollback` to finish it. MariaDB implicitly
+starts the next transaction when another statement executes while autocommit
+remains disabled. Commit and rollback return an invalid-state error while
+autocommit is enabled.
+
+The standard `adbc.connection.transaction.isolation_level` option supports:
+
+- `adbc.connection.transaction.isolation.default`
+- `adbc.connection.transaction.isolation.read_uncommitted`
+- `adbc.connection.transaction.isolation.read_committed`
+- `adbc.connection.transaction.isolation.repeatable_read`
+- `adbc.connection.transaction.isolation.serializable`
+
+The option applies to the dedicated MariaDB session used by the ADBC
+connection and can also be read to obtain the active level. Snapshot and
+linearizable isolation are not supported by MariaDB and return ADBC
+`NOT_IMPLEMENTED`. Change the isolation level before starting a transaction;
+MariaDB does not allow transaction characteristics to change while a
+transaction is active.
+
+```python
+from adbc_driver_manager import ConnectionOptions, dbapi
+
+option = ConnectionOptions.ISOLATION_LEVEL.value
+level = "adbc.connection.transaction.isolation.serializable"
+
+with dbapi.connect(
+    driver="mariadb",
+    uri="mariadb://root@localhost/demo",
+    autocommit=False,
+) as conn:
+    conn.adbc_connection.set_options(**{option: level})
+    print(conn.adbc_connection.get_option(option))
+
+    with conn.cursor() as cursor:
+        cursor.execute("UPDATE accounts SET balance = balance - 10 WHERE id = 1")
+    conn.commit()
+```
+
 ### Object metadata
 
 `GetObjects` exposes MariaDB table metadata through the standard ADBC nested
@@ -178,6 +249,19 @@ TABLE` or `ANALYZE FORMAT=JSON`, since those operations can scan data, update
 persistent optimizer statistics, or execute the analyzed statement.
 
 ## Options
+
+`adbc.connection.autocommit`
+: **Values:** `true`, `false`. **Default:** `true`.
+
+  Enable or disable MariaDB session autocommit. Enabling autocommit commits any
+  active transaction, following MariaDB semantics.
+
+`adbc.connection.transaction.isolation_level`
+: **Values:** `default`, `read_uncommitted`, `read_committed`,
+  `repeatable_read`, and `serializable`, using their full standardized ADBC
+  option values listed above.
+
+  Get or set the transaction isolation level for the MariaDB session.
 
 `mariadb.query.zero_datetime_behavior`
 : **Values:** `error`, `convert_to_null`. **Default:** `error`.
