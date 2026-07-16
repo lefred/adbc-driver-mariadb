@@ -244,7 +244,7 @@ func (q *MariaDBQuirks) SupportsGetSetOptions() bool                 { return tr
 func (q *MariaDBQuirks) SupportsGetTableSchema() bool                { return true }
 func (q *MariaDBQuirks) SupportsPartitionedData() bool               { return false }
 func (q *MariaDBQuirks) SupportsStatistics() bool                    { return false }
-func (q *MariaDBQuirks) SupportsTransactions() bool                  { return false }
+func (q *MariaDBQuirks) SupportsTransactions() bool                  { return true }
 func (q *MariaDBQuirks) SupportsGetParameterSchema() bool            { return false }
 func (q *MariaDBQuirks) SupportsDynamicParameterBinding() bool       { return true }
 func (q *MariaDBQuirks) SupportsErrorIngestIncompatibleSchema() bool { return true }
@@ -345,6 +345,39 @@ func (s *MariaDBTests) TearDownTest() {
 	s.NoError(s.db.Close(s.ctx))
 	s.db = nil
 	s.driver = nil
+}
+
+func (s *MariaDBTests) TestTransactions() {
+	options := s.cnxn.(adbc.GetSetOptionsWithContext)
+
+	s.Require().NoError(s.stmt.SetSqlQuery(s.ctx, "CREATE TEMPORARY TABLE adbc_transaction_test (value INT)"))
+	_, err := s.stmt.ExecuteUpdate(s.ctx)
+	s.Require().NoError(err)
+	s.Require().NoError(options.SetOption(s.ctx, adbc.OptionKeyAutoCommit, adbc.OptionValueDisabled))
+
+	s.Require().NoError(s.stmt.SetSqlQuery(s.ctx, "INSERT INTO adbc_transaction_test VALUES (1)"))
+	_, err = s.stmt.ExecuteUpdate(s.ctx)
+	s.Require().NoError(err)
+	s.Require().NoError(s.cnxn.Rollback(s.ctx))
+	s.EqualValues(0, s.transactionTestRowCount())
+
+	s.Require().NoError(s.stmt.SetSqlQuery(s.ctx, "INSERT INTO adbc_transaction_test VALUES (2)"))
+	_, err = s.stmt.ExecuteUpdate(s.ctx)
+	s.Require().NoError(err)
+	s.Require().NoError(s.cnxn.Commit(s.ctx))
+	s.EqualValues(1, s.transactionTestRowCount())
+
+	s.Require().NoError(options.SetOption(s.ctx, adbc.OptionKeyAutoCommit, adbc.OptionValueEnabled))
+}
+
+func (s *MariaDBTests) transactionTestRowCount() int64 {
+	s.Require().NoError(s.stmt.SetSqlQuery(s.ctx, "SELECT COUNT(*) FROM adbc_transaction_test"))
+	rdr, _, err := s.stmt.ExecuteQuery(s.ctx)
+	s.Require().NoError(err)
+	defer rdr.Release()
+	s.Require().True(rdr.Next())
+	s.Require().NoError(rdr.Err())
+	return rdr.RecordBatch().Column(0).(*array.Int64).Value(0)
 }
 
 type selectCase struct {

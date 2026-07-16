@@ -727,6 +727,9 @@ var _ driverbase.CurrentNamespacer = (*mariadbConnectionImpl)(nil)
 // implements TableTypeLister interface
 var _ driverbase.TableTypeLister = (*mariadbConnectionImpl)(nil)
 
+// implements AutocommitSetter interface
+var _ driverbase.AutocommitSetter = (*mariadbConnectionImpl)(nil)
+
 // mariadbConnectionFactory creates MariaDB connections
 type mariadbConnectionFactory struct {
 }
@@ -838,6 +841,44 @@ func (c *mariadbConnectionImpl) SetOption(ctx context.Context, key, value string
 	default:
 		return c.ConnectionImplBase.SetOption(ctx, key, value)
 	}
+}
+
+// SetAutocommit updates the transaction mode for this connection's dedicated
+// MariaDB session.  MariaDB starts a new transaction implicitly when the next
+// statement executes while autocommit is disabled.
+func (c *mariadbConnectionImpl) SetAutocommit(ctx context.Context, enabled bool) error {
+	if err := c.ClearPending(); err != nil {
+		return err
+	}
+
+	value := "0"
+	if enabled {
+		value = "1"
+	}
+	if _, err := c.Conn.ExecContext(ctx, "SET autocommit = "+value); err != nil {
+		return c.ErrorHelper.WrapIO(err, "failed to set autocommit to %t", enabled)
+	}
+	return nil
+}
+
+func (c *mariadbConnectionImpl) Commit(ctx context.Context) error {
+	if err := c.ClearPending(); err != nil {
+		return err
+	}
+	if _, err := c.Conn.ExecContext(ctx, "COMMIT"); err != nil {
+		return c.ErrorHelper.WrapIO(err, "failed to commit transaction")
+	}
+	return nil
+}
+
+func (c *mariadbConnectionImpl) Rollback(ctx context.Context) error {
+	if err := c.ClearPending(); err != nil {
+		return err
+	}
+	if _, err := c.Conn.ExecContext(ctx, "ROLLBACK"); err != nil {
+		return c.ErrorHelper.WrapIO(err, "failed to roll back transaction")
+	}
+	return nil
 }
 
 func (s *mariadbStatement) GetOption(ctx context.Context, key string) (string, error) {
