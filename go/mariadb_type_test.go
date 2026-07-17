@@ -164,7 +164,7 @@ func TestMariaDBSpatialConversionUsesGeoArrowWKB(t *testing.T) {
 	require.Equal(t, internal[4:], result.Value(0))
 
 	connection := &mariadbConnectionImpl{}
-	require.Equal(t, "ST_GeomFromWKB(?)", connection.GetPlaceholder(&field, 0))
+	require.Equal(t, "ST_GeomFromWKB(CAST(? AS BINARY))", connection.GetPlaceholder(&field, 0))
 }
 
 func TestMariaDBTimestampPrecision(t *testing.T) {

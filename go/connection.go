@@ -404,7 +404,9 @@ func (c *mariadbConnectionImpl) QuoteIdentifiers(parts []string) string {
 // GetPlaceholder implements BulkIngester
 func (c *mariadbConnectionImpl) GetPlaceholder(field *arrow.Field, index int) string {
 	if logicalType, ok := field.Metadata.GetValue(metaKeyLogicalArrowType); ok && logicalType == "geoarrow.wkb" {
-		return "ST_GeomFromWKB(?)"
+		// go-sql-driver/mysql sends bound []byte values as the protocol's
+		// string type. MariaDB's spatial functions require a binary argument.
+		return "ST_GeomFromWKB(CAST(? AS BINARY))"
 	}
 	return "?"
 }
